@@ -15,13 +15,17 @@ class Config {
       iamRoleName: core.getInput('iam-role-name'),
       runnerHomeDir: core.getInput('runner-home-dir'),
       preRunnerScript: core.getInput('pre-runner-script'),
+      marketType: core.getInput('market-type'),
       runnerName: core.getInput('runner-name'),
     };
 
     const tags = JSON.parse(core.getInput('aws-resource-tags'));
     this.tagSpecifications = null;
     if (tags.length > 0) {
-      this.tagSpecifications = [{ResourceType: 'instance', Tags: tags}, {ResourceType: 'volume', Tags: tags}];
+      this.tagSpecifications = [
+        { ResourceType: 'instance', Tags: tags },
+        { ResourceType: 'volume', Tags: tags },
+      ];
     }
 
     // the values of github.context.repo.owner and github.context.repo.repo are taken from
@@ -29,7 +33,7 @@ class Config {
     // provided by the GitHub Action on the runtime
     this.githubContext = {
       owner: github.context.repo.owner,
-      repo: github.context.repo.repo,      
+      repo: github.context.repo.repo,
     };
 
     //
@@ -47,6 +51,10 @@ class Config {
     if (this.input.mode === 'start') {
       if (!this.input.ec2ImageId || !this.input.ec2InstanceType || !this.input.subnetId || !this.input.securityGroupId) {
         throw new Error(`Not all the required inputs are provided for the 'start' mode`);
+      }
+
+      if (this.marketType?.length > 0 && this.input.marketType !== 'spot') {
+        throw new Error('Invalid `market-type` input. Allowed values: spot.');
       }
     } else if (this.input.mode === 'stop') {
       if (!this.input.label || !this.input.ec2InstanceId) {
