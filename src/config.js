@@ -21,6 +21,7 @@ class Config {
       subnetId: core.getInput('subnet-id'),
       runAsService: core.getInput('run-runner-as-service') === 'true',
       runAsUser: core.getInput('run-runner-as-user')
+      runnerName: core.getInput('runner-name'),
     };
 
     const tags = JSON.parse(core.getInput('aws-resource-tags'));
@@ -37,7 +38,7 @@ class Config {
     // provided by the GitHub Action on the runtime
     this.githubContext = {
       owner: github.context.repo.owner,
-      repo: github.context.repo.repo,
+      repo: github.context.repo.repo
     };
 
     //

@@ -9,7 +9,7 @@ function setOutput(label, ec2InstanceId) {
 }
 
 async function start() {
-  const label = config.input.label ? config.input.label : config.generateUniqueLabel();
+  const label = Math.random().toString(36).substr(2, 5);
   const githubRegistrationToken = await gh.getRegistrationToken();
   const ec2InstanceId = await aws.startEc2Instance(label, githubRegistrationToken);
   setOutput(label, ec2InstanceId);
@@ -22,7 +22,7 @@ async function stop() {
   await gh.removeRunner();
 }
 
-(async function () {
+(async function() {
   try {
     config.input.mode === 'start' ? await start() : await stop();
   } catch (error) {

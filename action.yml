@@ -94,6 +94,11 @@ inputs:
   run-runner-as-user:
     description: >-
       Specify user under whom the runner service should run
+  runner-name:
+    description: >-
+      Specifies name for runner
+    required: false
+
 outputs:
   label:
     description: >-
