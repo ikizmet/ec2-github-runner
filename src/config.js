@@ -20,7 +20,7 @@ class Config {
       startupTimeoutMinutes: core.getInput('startup-timeout-minutes'),
       subnetId: core.getInput('subnet-id'),
       runAsService: core.getInput('run-runner-as-service') === 'true',
-      runAsUser: core.getInput('run-runner-as-user')
+      runAsUser: core.getInput('run-runner-as-user'),
       runnerName: core.getInput('runner-name'),
     };
 
