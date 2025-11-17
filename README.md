@@ -147,7 +147,7 @@ Use the following steps to prepare your workflow for running on your EC2 self-ho
 
 > [!IMPORTANT]
 > If you are planning on using Spot instances for your runner, AWS uses a service-linked role to provision the instances.
-> 
+>
 > For this to work, at least one of the following must be true:
 > - The service-linked role exists already. This happens if you request a Spot instance via the AWS Console interface.
 > - You create the service-linked role via the Console, AWS CLI or AWS API.
@@ -188,8 +188,8 @@ Alternatively, you can use a vanilla EC2 AMI and set up the dependencies via `pr
 1. Create a new VPC and a new subnet in it.
    Or use the existing VPC and subnet.
 2. Create a new security group for the runners in the VPC.
-   Only the outbound traffic on port 443 should be allowed for pulling jobs from GitHub.
-   No inbound traffic is required.
+   Only **outbound** traffic on port TCP/443 is required to pull jobs from GitHub.
+   No inbound traffic is required for this purpose, but if your workflow needs to access external repositories or internal SSH, other ports like TCP/22, TCP/80, etc ... may be required.
 
 **5. Configure the GitHub workflow**
 
@@ -217,9 +217,13 @@ Now you're ready to go!
 | `runner-home-dir`                                                                                                                                                              | Optional. Used only with the `start` mode. | Specifies a directory where pre-installed actions-runner software and scripts are located.<br><br> |
 | `pre-runner-script`                                                                                                                                                              | Optional. Used only with the `start` mode. | Specifies bash commands to run before the runner starts.  It's useful for installing dependencies with apt-get, yum, dnf, etc. For example:<pre>          - name: Start EC2 runner<br>            with:<br>              mode: start<br>              ...<br>              pre-runner-script: \|<br>                 sudo yum update -y && \ <br>                 sudo yum install docker git libicu -y<br>                 sudo systemctl enable docker</pre> |
 | `market-type` | Optional. Used only with the `start` mode. | The only valid option is `spot`. If `spot` is specified, a Spot instance will be requested. If left unspecified, an on-demand instance will be provisioned. |
+| `block-device-mappings` | Optional. Used only with the `start` mode. | JSON string specifying the block device mappings for the EC2 instance. For example: <br> <pre>[{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 100, "VolumeType": "gp3"}}]</pre> See <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_BlockDeviceMapping.html">AWS BlockDeviceMapping docs</a> for all options. |
 | `startup-quiet-period-seconds` | Optional | Default: 30 |
 | `startup-retry-interval-seconds` | Optional | Default: 10 |
-| `startup-timeout-minutes` | Optional | Default: 5 | 
+| `startup-timeout-minutes` | Optional | Default: 5 |
+| `ec2-volume-size` | Optional | Defines the size of the EC2 Volume in GB, will use the AWS default of 8 GB if not provided. |
+| `ec2-device-name` | Optional | Defines the device name used for the root volume. |
+| `ec2-volume-type` | Optional | Defines the device type used for the root volume. |
 
 ### Environment variables
 
@@ -238,6 +242,8 @@ We recommend using [aws-actions/configure-aws-credentials](https://github.com/aw
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `label`                                                                                                                                                                      | Name of the unique label assigned to the runner. <br><br> The label is used in two cases: <br> - to use as the input of `runs-on` property for the following jobs; <br> - to remove the runner from GitHub when it is not needed anymore. |
 | `ec2-instance-id`                                                                                                                                                            | EC2 Instance Id of the created runner. <br><br> The id is used to terminate the EC2 instance when the runner is not needed anymore.                                                                                                       |
+| `region`                                                                                                                                                                      | AWS region where the EC2 instance was created. <br><br> This is useful for subsequent AWS operations on the instance.                                                                                                                     |
+
 
 ### Example
 
@@ -275,6 +281,10 @@ jobs:
             [
               {"Key": "Name", "Value": "ec2-github-runner"},
               {"Key": "GitHubRepository", "Value": "${{ github.repository }}"}
+            ]
+          block-device-mappings: > # optional, to customize EBS volumes
+            [
+              {"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 100, "VolumeType": "gp3"}}
             ]
   do-the-job:
     name: Do the job on the runner

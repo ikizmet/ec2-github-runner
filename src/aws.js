@@ -3,8 +3,8 @@ const { EC2Client, RunInstancesCommand, TerminateInstancesCommand, waitUntilInst
 const core = require('@actions/core');
 const config = require('./config');
 
-// User data scripts are run as the root user
-function buildUserDataScript(githubRegistrationToken, label) {
+// Build the commands to run on the instance
+function buildRunCommands(githubRegistrationToken, label) {
   let userData;
   if (config.input.runnerHomeDir) {
     // If runner home directory is specified, we expect the actions-runner software (and dependencies)
@@ -13,8 +13,7 @@ function buildUserDataScript(githubRegistrationToken, label) {
       '#!/bin/bash',
       'exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1',
       `cd "${config.input.runnerHomeDir}"`,
-      `echo "${config.input.preRunnerScript}" > pre-runner-script.sh`,
-      'source pre-runner-script.sh',
+      'source /tmp/pre-runner-script.sh',
       'export RUNNER_ALLOW_RUNASROOT=1',
       `./config.sh --url https://github.com/${config.githubContext.owner}/${config.githubContext.repo} --token ${githubRegistrationToken} --labels ${label} --name ${config.input.runnerName}`,
     ];
@@ -23,11 +22,10 @@ function buildUserDataScript(githubRegistrationToken, label) {
       '#!/bin/bash',
       'exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1',
       'mkdir actions-runner && cd actions-runner',
-      `echo "${config.input.preRunnerScript}" > pre-runner-script.sh`,
-      'source pre-runner-script.sh',
+      'source /tmp/pre-runner-script.sh',
       'export RUNNER_VERSION="2.328.0"',
       'case $(uname -m) in aarch64) ARCH="arm64" ;; amd64|x86_64) ARCH="x64" ;; esac && export RUNNER_ARCH=${ARCH}',
-      `curl -O -L https://github.com/actions/runner/releases/download/v\${RUNNER_VERSION}/actions-runner-linux-$\{RUNNER_ARCH}-\${RUNNER_VERSION}.tar.gz`,
+      `curl -O -L https://github.com/actions/runner/releases/download/v\${RUNNER_VERSION}/actions-runner-linux-\${RUNNER_ARCH}-\${RUNNER_VERSION}.tar.gz`,
       'tar xzf ./actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz',
       'export RUNNER_ALLOW_RUNASROOT=1',
       `./config.sh --url https://github.com/${config.githubContext.owner}/${config.githubContext.repo} --token ${githubRegistrationToken} --labels ${label} --name ${config.input.runnerName}`,
@@ -45,6 +43,57 @@ function buildUserDataScript(githubRegistrationToken, label) {
   return userData;
 }
 
+// Build cloud-init YAML user data
+function buildUserDataScript(githubRegistrationToken, label) {
+  const runCommands = buildRunCommands(githubRegistrationToken, label);
+  
+  // Create a script file with all commands to avoid YAML escaping issues
+  const scriptContent = runCommands.join('\n');
+  
+  // Start with cloud-init header
+  let yamlContent = '#cloud-config\n';
+  
+  // Add packages if specified
+  if (config.input.packages && config.input.packages.length > 0) {
+    yamlContent += 'packages:\n';
+    config.input.packages.forEach(pkg => {
+      yamlContent += `  - ${pkg}\n`;
+    });
+  }
+  
+  // Write files
+  yamlContent += 'write_files:\n';
+  
+  // Always write pre-runner script (even if empty) since runner-setup.sh always sources it
+  yamlContent += '  - path: /tmp/pre-runner-script.sh\n';
+  yamlContent += '    permissions: "0755"\n';
+  yamlContent += '    content: |\n';
+  
+  if (config.input.preRunnerScript) {
+    config.input.preRunnerScript.split('\n').forEach(line => {
+      yamlContent += `      ${line}\n`;
+    });
+  } else {
+    yamlContent += '      #!/bin/bash\n';
+  }
+  
+  // Write main setup script
+  yamlContent += '  - path: /tmp/runner-setup.sh\n';
+  yamlContent += '    permissions: "0755"\n';
+  yamlContent += '    content: |\n';
+  
+  // Add each line of the script with proper indentation
+  scriptContent.split('\n').forEach(line => {
+    yamlContent += `      ${line}\n`;
+  });
+  
+  // Execute the script
+  yamlContent += 'runcmd:\n';
+  yamlContent += '  - /tmp/runner-setup.sh\n';
+  
+  return yamlContent;
+}
+
 function buildMarketOptions() {
   if (config.input.marketType !== 'spot') {
     return undefined;
@@ -58,33 +107,86 @@ function buildMarketOptions() {
   };
 }
 
-async function startEc2Instance(label, githubRegistrationToken) {
-  const ec2 = new EC2Client();
+async function createEc2InstanceWithParams(imageId, subnetId, securityGroupId, label, githubRegistrationToken, region) {
+  // Region is always specified now, so we can directly use it
+  const ec2ClientOptions = { region };
+  const ec2 = new EC2Client(ec2ClientOptions);
 
   const userData = buildUserDataScript(githubRegistrationToken, label);
 
   const params = {
-    ImageId: config.input.ec2ImageId,
+    ImageId: imageId,
     InstanceType: config.input.ec2InstanceType,
     MaxCount: 1,
     MinCount: 1,
-    SecurityGroupIds: [config.input.securityGroupId],
-    SubnetId: config.input.subnetId,
-    UserData: Buffer.from(userData.join('\n')).toString('base64'),
-    IamInstanceProfile: { Name: config.input.iamRoleName },
+    SecurityGroupIds: [securityGroupId],
+    SubnetId: subnetId,
+    UserData: Buffer.from(userData).toString('base64'),
+    IamInstanceProfile: config.input.iamRoleName ? { Name: config.input.iamRoleName } : undefined,
     TagSpecifications: config.tagSpecifications,
     InstanceMarketOptions: buildMarketOptions(),
+    MetadataOptions: Object.keys(config.input.metadataOptions).length > 0 ? config.input.metadataOptions : undefined,
   };
 
-  try {
-    const result = await ec2.send(new RunInstancesCommand(params));
-    const ec2InstanceId = result.Instances[0].InstanceId;
-    core.info(`AWS EC2 instance ${ec2InstanceId} is started`);
-    return ec2InstanceId;
-  } catch (error) {
-    core.error('AWS EC2 instance starting error');
-    throw error;
+  if (config.input.ec2VolumeSize !== '' || config.input.ec2VolumeType !== '') {
+    params.BlockDeviceMappings = [
+      {
+        DeviceName: config.input.ec2DeviceName,
+        Ebs: {
+          ...(config.input.ec2VolumeSize !== '' && { VolumeSize: config.input.ec2VolumeSize }),
+          ...(config.input.ec2VolumeType !== '' && { VolumeType: config.input.ec2VolumeType }),
+        },
+      },
+    ];
   }
+
+  if (config.input.blockDeviceMappings.length > 0) {
+    params.BlockDeviceMappings = config.input.blockDeviceMappings;
+  }
+
+  const result = await ec2.send(new RunInstancesCommand(params));
+  const ec2InstanceId = result.Instances[0].InstanceId;
+  return ec2InstanceId;
+}
+
+async function startEc2Instance(label, githubRegistrationToken) {
+  core.info(`Attempting to start EC2 instance using ${config.availabilityZones.length} availability zone configuration(s)`);
+  
+  const errors = [];
+  
+  // Try each availability zone configuration in sequence
+  for (let i = 0; i < config.availabilityZones.length; i++) {
+    const azConfig = config.availabilityZones[i];
+    // Region is now always specified in the availability zone config
+    const region = azConfig.region;
+    core.info(`Trying availability zone configuration ${i + 1}/${config.availabilityZones.length}`);
+    core.info(`Using imageId: ${azConfig.imageId}, subnetId: ${azConfig.subnetId}, securityGroupId: ${azConfig.securityGroupId}, region: ${region}`);
+    
+    try {
+      const ec2InstanceId = await createEc2InstanceWithParams(
+        azConfig.imageId,
+        azConfig.subnetId,
+        azConfig.securityGroupId,
+        label,
+        githubRegistrationToken,
+        region
+      );
+      
+      core.info(`Successfully started AWS EC2 instance ${ec2InstanceId} using availability zone configuration ${i + 1} in region ${region}`);
+      return { ec2InstanceId, region };
+    } catch (error) {
+      const errorMessage = `Failed to start EC2 instance with configuration ${i + 1} in region ${region}: ${error.message}`;
+      core.warning(errorMessage);
+      errors.push(errorMessage);
+      
+      // Continue to the next availability zone configuration
+      continue;
+    }
+  }
+  
+  // If we've tried all configurations and none worked, throw an error
+  core.error('All availability zone configurations failed');
+  throw new Error(`Failed to start EC2 instance in any availability zone. Errors: ${errors.join('; ')}`);
 }
 
 async function terminateEc2Instance() {
@@ -104,8 +206,13 @@ async function terminateEc2Instance() {
   }
 }
 
-async function waitForInstanceRunning(ec2InstanceId) {
-  const ec2 = new EC2Client();
+async function waitForInstanceRunning(ec2InstanceId, region) {
+  // Region is always provided now
+  const ec2ClientOptions = { region };
+  const ec2 = new EC2Client(ec2ClientOptions);
+  
+  core.info(`Using region ${region} for checking instance ${ec2InstanceId} status`);
+  
   try {
     core.info(`Checking for instance ${ec2InstanceId} to be up and running`);
     await waitUntilInstanceRunning(
